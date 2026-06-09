@@ -1,0 +1,6 @@
+{
+  "name": "A股AI选股系统",
+  "description": "基于大数据、五维评分、信号系统、板块热度与情绪周期的全方位智能A股AI选股决策系统",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
