@@ -1,192 +1,237 @@
+/**
+ * 量化回测系统 V4.0 — 止损止盈真实生效 + 增强指标
+ */
 import React, { useState } from 'react';
 import { API_BASE } from '../services/api';
-import { StockInfo, BacktestConfig, BacktestResult } from '../types';
-import { Play, TrendingUp, AlertTriangle, Scale, BarChart2 } from 'lucide-react';
-import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts';
+import { StockInfo } from '../types';
+import { Play, TrendingUp, AlertTriangle, BarChart2, Shield, Target, Activity } from 'lucide-react';
+import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, Area, AreaChart } from 'recharts';
 import { motion } from 'motion/react';
 
 interface BacktestSystemProps { selectedStockCode?: string; stocks?: StockInfo[]; }
 
-const STRATEGY_TO_BACKEND: Record<string, string> = {
-  MA_CROSSOVER: 'ma_cross', LOW_VALUATION: 'score',
-  LEADER_FOLLOW: 'macd', SENTIMENT_CYCLE: 'score',
-};
-
-function mapApiResult(apiData: any, initialCapital: number): BacktestResult {
-  const m = apiData.metrics || {};
-  const trades = apiData.trades || [];
-  const totalReturn = m.total_return_pct ?? 0;
-  // 真实沪深300基准(API返回) 或 降级为估算
-  const realBench = apiData.benchmark_return;
-  const benchReturn = realBench != null ? realBench : parseFloat((totalReturn * 0.65).toFixed(2));
-  const chartData = trades
-    .filter((_: any, i: number) => i % Math.max(1, Math.floor(trades.length / 30)) === 0 || i === trades.length - 1)
-    .map((t: any, idx: number) => ({
-      date: typeof t.date === 'number' ? `D${t.date}` : String(t.date || idx),
-      strategyReturn: parseFloat((((t.equity || initialCapital) / initialCapital - 1) * 100).toFixed(2)),
-      benchmarkReturn: parseFloat((benchReturn * (idx / Math.max(1, trades.length - 1))).toFixed(2)),
-      capital: Math.round(t.equity || initialCapital),
-    }));
-  const commentary = [
-    `年化: ${m.annual_return ?? 'N/A'}%`, `夏普: ${(m.sharpe_ratio ?? 0).toFixed(2)}`,
-    `交易: ${m.total_trades ?? 0}笔 (盈${m.profit_trades ?? 0}/亏${m.loss_trades ?? 0})`,
-    `沪深300: ${benchReturn.toFixed(2)}%`, `超额: ${(totalReturn - benchReturn).toFixed(2)}%`,
-    `最终权益: ¥${(m.final_equity ?? initialCapital).toLocaleString()}`,
-  ].join(' | ');
-  const tradeLogs = trades.filter((t: any) => t.action === 'buy' || t.action === 'sell').slice(-20).map((t: any) => ({
-    date: typeof t.date === 'number' ? `D${t.date}` : String(t.date || ''),
-    type: t.action === 'buy' ? '建仓' as const : '卖出' as const,
-    price: parseFloat((t.price || 0).toFixed(2)),
-    shares: t.shares || (t.action === 'buy' ? 100 : 0),
-    reason: t.action === 'buy' ? '信号触发买入' : '信号触发卖出',
-  }));
-  return {
-    totalReturn: parseFloat(totalReturn.toFixed(2)),
-    benchmarkReturn: benchReturn,
-    winRate: parseFloat((m.win_rate ?? 0).toFixed(1)),
-    maxDrawdown: parseFloat((m.max_drawdown ?? 0).toFixed(2)),
-    tradeCount: m.total_trades ?? 0, chartData, commentary, tradeLogs,
-  };
-}
+const STRATEGIES = [
+  { key: 'ma_cross',   label: '均线金叉 (MA5×MA20)', desc: '短期动量突破' },
+  { key: 'macd',       label: 'MACD动能', desc: '趋势跟踪经典' },
+  { key: 'score',      label: '五维综合评分', desc: '多因子驱动' },
+  { key: 'boll_break', label: '布林突破', desc: '波动率突破' },
+  { key: 'dual_ma',    label: '双均线趋势', desc: '中长期趋势跟踪' },
+];
 
 export default function BacktestSystem({ selectedStockCode, stocks = [] }: BacktestSystemProps) {
-  const [config, setConfig] = useState<BacktestConfig>({
-    strategy: 'MA_CROSSOVER', startDate: '2026-01-01', endDate: '2026-06-01',
-    initialCapital: 100000, stopLossPct: 5, takeProfitPct: 15, targetType: 'STOCK',
-    selectedStockCode: selectedStockCode || '',
-  });
+  const [code, setCode] = useState(selectedStockCode || '');
+  const [strategy, setStrategy] = useState('ma_cross');
+  const [capital, setCapital] = useState(100000);
+  const [stopLoss, setStopLoss] = useState(-5);
+  const [takeProfit, setTakeProfit] = useState(15);
+  const [position, setPosition] = useState(100);
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<any>(null);
+  const [error, setError] = useState('');
 
-  React.useEffect(() => { if (selectedStockCode) setConfig((prev) => ({ ...prev, selectedStockCode })); }, [selectedStockCode]);
+  React.useEffect(() => { if (selectedStockCode) setCode(selectedStockCode); }, [selectedStockCode]);
 
-  const [result, setResult] = useState<BacktestResult | null>(null);
-  const [running, setRunning] = useState<boolean>(false);
-  const [errorMsg, setErrorMsg] = useState<string>('');
-  const [apiSource, setApiSource] = useState<string>('');
+  const handleRun = async () => {
+    if (!code) { setError('请先选择回测标的'); return; }
+    setRunning(true); setError(''); setResult(null);
 
-  const handleRunBacktest = async () => {
-    setRunning(true); setErrorMsg(''); setApiSource('');
-    if (!config.selectedStockCode) { setErrorMsg('请先选择回测标的股票'); setRunning(false); return; }
-
-    const backendStrategy = STRATEGY_TO_BACKEND[config.strategy] || 'score';
     try {
-      const res = await fetch(`${API_BASE}/api/backtest/run?code=${config.selectedStockCode}&strategy=${backendStrategy}&capital=${config.initialCapital}`);
+      const params = new URLSearchParams({
+        code, strategy,
+        capital: String(capital),
+        stop_loss: String(stopLoss),
+        take_profit: String(takeProfit),
+        position: String(position / 100),
+      });
+      const res = await fetch(`${API_BASE}/api/backtest/run?${params}`);
       const data = await res.json();
       if (data.success && data.metrics && !data.metrics.error) {
-        setResult(mapApiResult(data, config.initialCapital));
-        setApiSource(`后端实算 · ${data.code || config.selectedStockCode} · ${data.days || '?'}天`);
+        setResult(data);
       } else {
-        setErrorMsg(data.error || data.metrics?.error || '回测指标不全');
+        setError(data.error || data.metrics?.error || '回测失败');
       }
     } catch (e) {
-      setErrorMsg('网络超时或回测后端不可达，请核对服务状态。');
+      setError('后端不可达，请检查服务状态');
     } finally {
       setRunning(false);
     }
   };
 
+  const m = result?.metrics || {};
+  const equityCurve = result?.equity_curve || [];
+  const benchCurve = result?.benchmark_curve || [];
+
+  // 合并策略+基准曲线（按日期对齐，非索引对齐）
+  const chartData = equityCurve.length > 0 ? equityCurve
+    .filter((_: any, i: number) => i % Math.max(1, Math.floor(equityCurve.length / 50)) === 0 || i === equityCurve.length - 1)
+    .map((pt: any) => {
+      // 找到同日期最近的基准点
+      const benchPt = benchCurve.length > 0
+        ? benchCurve.reduce((best: any, b: any) => {
+            const bDate = String(b.date || '').replace(/-/g, '');
+            const pDate = String(pt.date || '').replace(/-/g, '');
+            return Math.abs(parseInt(bDate) - parseInt(pDate)) < Math.abs(parseInt(best?.date?.replace(/-/g, '') || '99999999') - parseInt(pDate)) ? b : best;
+          }, benchCurve[0])
+        : null;
+      return {
+        date: pt.date?.slice(5) || 'N/A',
+        strategy: round((pt.equity / capital - 1) * 100),
+        benchmark: benchPt ? round((benchPt.value / capital - 1) * 100) : null,
+      };
+    }) : [];
+
   return (
-    <div className="bg-white border border-slate-200 shadow-sm rounded-xl p-5 hover:border-slate-300 hover:shadow-md transition" id="backtest-system-module">
-      <div className="flex justify-between items-center mb-1">
-        <h2 className="text-lg font-bold text-slate-850 flex items-center gap-2">
-          <BarChart2 className="w-5 h-5 text-red-500" />全历史策略量化回测系统
-          {apiSource && (<span className="text-[9px] font-normal text-emerald-600 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20">📡 {apiSource}</span>)}
+    <div className="space-y-4">
+      {/* 配置面板 */}
+      <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
+        <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2 mb-4">
+          <BarChart2 className="w-5 h-5 text-red-500" />量化策略回测 V4.0
         </h2>
-      </div>
-      <p className="text-xs text-slate-500 mb-5">对精选个股策略进行历史数据拟合（含最大回撤限额）— 依赖 Python 后端回测引擎</p>
 
-      <div className="grid grid-cols-1 xl:grid-cols-12 gap-5">
-        <div className="xl:col-span-4 bg-slate-50 p-4 rounded-xl border border-slate-200 flex flex-col gap-4">
-          <div className="text-xs font-bold text-slate-700 flex items-center gap-1"><Scale className="w-4 h-4 text-red-505" />量化因子参数设定面板</div>
-
-          <div>
-            <label className="text-[10px] text-slate-500 block mb-1 font-bold">选择回测个股标的:</label>
-            <select value={config.selectedStockCode || ''} onChange={(e) => setConfig({ ...config, selectedStockCode: e.target.value })}
-              className="w-full bg-white border border-slate-250 text-xs text-slate-800 rounded p-1.5 focus:outline-none focus:border-red-500 transition cursor-pointer font-mono">
-              {stocks.map((stock) => (<option key={stock.code} value={stock.code}>{stock.name} ({stock.code})</option>))}
-            </select>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {/* 标的 + 策略 */}
+          <div className="space-y-3">
+            <div>
+              <label className="text-[10px] font-bold text-slate-500 block mb-1">回测标的</label>
+              <select value={code} onChange={e => setCode(e.target.value)}
+                className="w-full bg-slate-50 border border-slate-200 text-xs rounded-lg p-2 font-mono focus:outline-none focus:border-red-500">
+                <option value="">-- 选择股票 --</option>
+                {stocks.map(s => <option key={s.code} value={s.code}>{s.name} ({s.code})</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="text-[10px] font-bold text-slate-500 block mb-1">交易策略</label>
+              <select value={strategy} onChange={e => setStrategy(e.target.value)}
+                className="w-full bg-slate-50 border border-slate-200 text-xs rounded-lg p-2 font-mono focus:outline-none focus:border-red-500">
+                {STRATEGIES.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
+              </select>
+              <p className="text-[10px] text-slate-400 mt-1">{STRATEGIES.find(s => s.key === strategy)?.desc}</p>
+            </div>
           </div>
 
-          <div>
-            <label className="text-[10px] text-slate-500 block mb-1 font-bold">执行回测策略:</label>
-            <select value={config.strategy} onChange={(e) => setConfig({ ...config, strategy: e.target.value as BacktestConfig['strategy'] })}
-              className="w-full bg-white border border-slate-250 text-xs text-slate-800 rounded p-2 focus:outline-none focus:border-red-500 transition cursor-pointer">
-              <option value="MA_CROSSOVER">5日/20日均线金叉策略</option>
-              <option value="LOW_VALUATION">高分红低估值安全防御策略</option>
-              <option value="LEADER_FOLLOW">连板龙头强热度跟随策略</option>
-              <option value="SENTIMENT_CYCLE">情绪周期多级拐点抄底策略</option>
-            </select>
+          {/* 资金 + 仓位 */}
+          <div className="space-y-3">
+            <div>
+              <label className="text-[10px] font-bold text-slate-500 block mb-1">初始资金 (元)</label>
+              <input type="number" value={capital} onChange={e => setCapital(Number(e.target.value))}
+                className="w-full bg-slate-50 border border-slate-200 text-xs rounded-lg p-2 font-mono focus:outline-none focus:border-red-500" />
+            </div>
+            <div>
+              <label className="text-[10px] font-bold text-slate-500 block mb-1">仓位比例 (%)</label>
+              <input type="range" min={10} max={100} step={10} value={position} onChange={e => setPosition(Number(e.target.value))}
+                className="w-full accent-red-500" />
+              <span className="text-xs font-mono text-slate-600">{position}%</span>
+            </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div><label className="text-[10px] text-slate-500 block mb-1">初始拟入资金（元）:</label><input type="number" value={config.initialCapital} onChange={(e) => setConfig({ ...config, initialCapital: Number(e.target.value) })} className="w-full bg-white border border-slate-200 text-xs text-slate-800 rounded p-1.5 focus:outline-none font-mono focus:border-red-500" /></div>
-            <div><label className="text-[10px] text-slate-500 block mb-1">个股最大止损限额 (%):</label><input type="number" value={config.stopLossPct} onChange={(e) => setConfig({ ...config, stopLossPct: Number(e.target.value) })} className="w-full bg-white border border-slate-200 text-xs text-slate-800 rounded p-1.5 focus:outline-none font-mono focus:border-red-500" /></div>
+          {/* 风控参数 */}
+          <div className="space-y-3">
+            <div>
+              <label className="text-[10px] font-bold text-red-600 flex items-center gap-1 mb-1"><Shield className="w-3 h-3" />止损线 (%)</label>
+              <input type="number" value={stopLoss} onChange={e => setStopLoss(Number(e.target.value))}
+                className="w-full bg-red-50 border border-red-200 text-xs rounded-lg p-2 font-mono text-red-700 focus:outline-none focus:border-red-500" />
+            </div>
+            <div>
+              <label className="text-[10px] font-bold text-emerald-600 flex items-center gap-1 mb-1"><Target className="w-3 h-3" />止盈线 (%)</label>
+              <input type="number" value={takeProfit} onChange={e => setTakeProfit(Number(e.target.value))}
+                className="w-full bg-emerald-50 border border-emerald-200 text-xs rounded-lg p-2 font-mono text-emerald-700 focus:outline-none focus:border-emerald-500" />
+            </div>
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div><label className="text-[10px] text-slate-500 block mb-1">分段目标止盈范围 (%):</label><input type="number" value={config.takeProfitPct} onChange={(e) => setConfig({ ...config, takeProfitPct: Number(e.target.value) })} className="w-full bg-white border border-slate-200 text-xs text-slate-800 rounded p-1.5 focus:outline-none font-mono focus:border-red-500" /></div>
-            <div><label className="text-[10px] text-slate-500 block mb-1">默认回测周期:</label><div className="bg-slate-100 border border-slate-200 text-[11px] py-2 px-2.5 rounded text-slate-550">最近 30 个交易日</div></div>
-          </div>
-
-          <button onClick={handleRunBacktest} disabled={running}
-            className={`w-full py-2.5 rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${running ? 'bg-slate-200 text-slate-400 cursor-wait' : 'bg-red-600 hover:bg-red-550 text-white shadow-lg shadow-red-650/10'}`}>
-            <Play className={`w-3.5 h-3.5 ${running ? 'animate-spin' : ''}`} />{running ? '量化精算拟合中...' : '启动策略全速回测'}
-          </button>
-
-          {errorMsg && (<p className="text-[11px] text-red-600 text-center leading-relaxed font-semibold">{errorMsg}</p>)}
         </div>
 
-        <div className="xl:col-span-8 bg-slate-50/50 p-4 rounded-xl border border-slate-200 flex flex-col justify-between min-h-[360px]">
-          {!result ? (
-            <div className="h-full flex flex-col items-center justify-center py-16 text-center">
-              <AlertTriangle className="w-10 h-10 text-slate-400 mb-2" />
-              <p className="text-xs text-slate-500 font-medium">点击"启动策略全速回测"按钮，调用 Python 后端真实回测引擎并生成超额拟合图表</p>
+        <button onClick={handleRun} disabled={running}
+          className={`mt-4 w-full py-2.5 rounded-lg text-sm font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
+            running ? 'bg-slate-200 text-slate-400' : 'bg-red-600 hover:bg-red-700 text-white shadow-lg'
+          }`}>
+          <Play className={`w-4 h-4 ${running ? 'animate-spin' : ''}`} />
+          {running ? '回测引擎运行中...' : '启动策略回测'}
+        </button>
+
+        {error && <p className="text-xs text-red-600 font-semibold mt-2">{error}</p>}
+      </div>
+
+      {/* 回测结果 */}
+      {result && (
+        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-4">
+          {/* 核心指标 */}
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            {[
+              { l: '总收益率',  v: m.total_return_pct,  fmt: (v: number) => `${v >= 0 ? '+' : ''}${v}%`, c: 'text-red-600' },
+              { l: '年化收益',  v: m.annual_return,     fmt: (v: number) => `${v}%`, c: 'text-red-600' },
+              { l: '夏普比率',  v: m.sharpe_ratio,      fmt: (v: number) => v.toFixed(2), c: 'text-cyan-600' },
+              { l: '最大回撤',  v: m.max_drawdown,      fmt: (v: number) => `${v}%`, c: 'text-orange-500' },
+              { l: '卡尔玛比',  v: m.calmar_ratio,      fmt: (v: number) => v.toFixed(2), c: 'text-purple-600' },
+              { l: '胜率',     v: m.win_rate,           fmt: (v: number) => `${v}%`, c: 'text-slate-700' },
+              { l: '盈亏比',    v: m.profit_factor,      fmt: (v: number) => v.toFixed(2), c: 'text-slate-700' },
+              { l: '交易次数',  v: m.total_trades,       fmt: (v: number) => String(v), c: 'text-slate-700' },
+              { l: '止损触发',  v: m.stop_loss_count,    fmt: (v: number) => String(v), c: 'text-red-500' },
+              { l: '止盈触发',  v: m.take_profit_count,  fmt: (v: number) => String(v), c: 'text-emerald-500' },
+            ].map(({ l, v, fmt, c }, i) => (
+              <div key={i} className="bg-white border border-slate-200 rounded-lg p-3 text-center shadow-sm">
+                <span className="text-[10px] text-slate-500 block">{l}</span>
+                <span className={`text-sm font-black font-mono ${c}`}>{v != null ? fmt(v) : '-'}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* 权益曲线 */}
+          {chartData.length > 0 && (
+            <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
+              <h3 className="text-xs font-bold text-slate-600 mb-3">策略权益曲线 vs 沪深300基准</h3>
+              <ResponsiveContainer width="100%" height={300}>
+                <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="stratGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#ef4444" stopOpacity={0.3} />
+                      <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
+                    </linearGradient>
+                    <linearGradient id="benchGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#64748b" stopOpacity={0.15} />
+                      <stop offset="95%" stopColor="#64748b" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                  <XAxis dataKey="date" stroke="#94a3b8" fontSize={9} tickLine={false} />
+                  <YAxis stroke="#94a3b8" fontSize={9} tickLine={false} tickFormatter={v => `${v}%`} />
+                  <Tooltip contentStyle={{ borderRadius: 8, border: '1px solid #e2e8f0', fontSize: 11 }}
+                    formatter={(v: any, n: string) => n === 'strategy' ? [`${v}%`, '策略收益'] : [`${v}%`, '沪深300']} />
+                  <Legend iconType="circle" iconSize={6} wrapperStyle={{ fontSize: 10 }} />
+                  <Area name="strategy" type="monotone" dataKey="strategy" stroke="#ef4444" strokeWidth={2} fill="url(#stratGrad)" />
+                  <Area name="benchmark" type="monotone" dataKey="benchmark" stroke="#64748b" strokeWidth={1.5} fill="url(#benchGrad)" />
+                </AreaChart>
+              </ResponsiveContainer>
             </div>
-          ) : (
-            <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="flex flex-col gap-4 h-full justify-between w-full">
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-                {[{ l: '策略总收益率', v: result.totalReturn, c: result.totalReturn >= 0 ? 'text-red-500 font-extrabold' : 'text-emerald-600 font-extrabold', f: (v: number) => `${v >= 0 ? '+' : ''}${v}%` },
-                  { l: '沪深300基准', v: result.benchmarkReturn, c: result.benchmarkReturn >= 0 ? 'text-red-500 font-extrabold' : 'text-emerald-600 font-extrabold', f: (v: number) => `${v >= 0 ? '+' : ''}${v}%` },
-                  { l: '策略最终净值', v: null, c: 'text-slate-800 font-black', f: () => `¥${(config.initialCapital * (1 + result.totalReturn / 100)).toLocaleString(undefined, { maximumFractionDigits: 0 })}` },
-                  { l: '回测交易胜率', v: result.winRate, c: 'text-cyan-600 font-bold', f: (v: number) => `${v}%` },
-                  { l: '最大持仓回撤', v: result.maxDrawdown, c: 'text-orange-500 font-bold', f: (v: number) => `${v}%` },
-                ].map(({ l, v, c, f }, i) => (
-                  <div key={i} className={`bg-white p-2.5 rounded border border-slate-200 text-center ${i === 4 ? 'col-span-2 md:col-span-1' : ''} shadow-3xs`}>
-                    <span className="text-[9px] text-slate-500 block">{l}</span>
-                    <span className={`text-sm font-mono block mt-1 ${c}`}>{v != null ? f(v) : (f as () => string)()}</span>
+          )}
+
+          {/* 月度收益 + 交易记录 */}
+          {m.monthly_returns?.length > 0 && (
+            <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
+              <h3 className="text-xs font-bold text-slate-600 mb-2">月度收益热力</h3>
+              <div className="flex flex-wrap gap-1">
+                {m.monthly_returns.map((mr: any) => (
+                  <div key={mr.month}
+                    className={`px-2 py-1 rounded text-[10px] font-mono font-bold ${
+                      mr.return_pct > 0 ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'
+                    }`}
+                    title={`${mr.month}: ${mr.return_pct}%`}>
+                    {mr.month.slice(5)}<br/>{mr.return_pct > 0 ? '+' : ''}{mr.return_pct}%
                   </div>
                 ))}
               </div>
-
-              <div className="flex-1 bg-white p-3 rounded-lg border border-slate-200 mt-2 shadow-3xs">
-                <span className="font-bold text-slate-700 text-[10px] block mb-2">策略超额曲线模拟图 (%)</span>
-                <div className="h-56 w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={result.chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                      <defs>
-                        <linearGradient id="colorStrategy" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#ef4444" stopOpacity={0.25}/><stop offset="95%" stopColor="#ef4444" stopOpacity={0}/></linearGradient>
-                        <linearGradient id="colorBenchmark" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#64748b" stopOpacity={0.15}/><stop offset="95%" stopColor="#64748b" stopOpacity={0}/></linearGradient>
-                      </defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                      <XAxis dataKey="date" stroke="#64748b" fontSize={8} tickLine={false} axisLine={false} />
-                      <YAxis stroke="#64748b" fontSize={8} tickLine={false} axisLine={false} tickFormatter={(v) => `${v}%`} />
-                      <Tooltip contentStyle={{ backgroundColor: '#ffffff', borderColor: '#e2e8f0', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }} labelClassName="text-slate-550 text-[10px] font-mono font-bold" itemStyle={{ fontSize: '11px', fontFamily: 'monospace', padding: '2px 0' }} formatter={(value: any, name: any) => { if (name === 'strategyReturn') return [`${value}%`, '当前策略收益']; if (name === 'benchmarkReturn') return [`${value}%`, '沪深300基准']; if (name === 'capital') return [`¥${value.toLocaleString()}`, '策略折合资产']; return [value, name]; }} />
-                      <Legend iconType="circle" iconSize={6} wrapperStyle={{ fontSize: '9px', paddingTop: '8px' }} />
-                      <Area name="strategyReturn" type="monotone" dataKey="strategyReturn" stroke="#ef4444" strokeWidth={2} fillOpacity={1} fill="url(#colorStrategy)" />
-                      <Area name="benchmarkReturn" type="monotone" dataKey="benchmarkReturn" stroke="#64748b" strokeWidth={1.5} fillOpacity={1} fill="url(#colorBenchmark)" />
-                    </AreaChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-
-              {result.commentary && (
-                <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 mt-2">
-                  <span className="text-[10px] text-slate-550 font-bold block mb-1">📊 回测拟合报告 Summary:</span>
-                  <p className="text-[11px] text-slate-650 leading-relaxed font-semibold">{result.commentary}</p>
-                </div>
-              )}
-            </motion.div>
+            </div>
           )}
+        </motion.div>
+      )}
+
+      {!result && !running && (
+        <div className="bg-white border border-slate-200 rounded-xl p-12 text-center">
+          <Activity className="w-10 h-10 text-slate-300 mx-auto mb-3" />
+          <p className="text-sm text-slate-500 font-semibold">选择股票和策略，点击「启动策略回测」</p>
+          <p className="text-xs text-slate-400 mt-1">止损/止盈/仓位参数真实参与回测计算</p>
         </div>
-      </div>
+      )}
     </div>
   );
 }
+
+function round(v: number): number { return parseFloat(v.toFixed(2)); }

@@ -10,8 +10,8 @@ interface FiveDimRatingProps {
 }
 
 interface RealScores {
-  valuation: number; profitability: number; technical: number;
-  capitalFlow: number; prosperity: number;
+  valuation: number; earningsQuality: number; growth: number;
+  trend: number; momentum: number; health: number; consensus: number; risk: number;
 }
 
 export default function FiveDimRating({ selectedStock, stocks = [], onSelectStockCode }: FiveDimRatingProps) {
@@ -54,10 +54,13 @@ export default function FiveDimRating({ selectedStock, stocks = [], onSelectStoc
           const s = d.data;
           setRealScores({
             valuation: s.valuation_score ?? 0,
-            profitability: s.profitability_score ?? 0,
-            technical: s.technical_score ?? 0,
-            capitalFlow: s.capital_score ?? 0,
-            prosperity: s.prosperity_score ?? 0,
+            earningsQuality: s.earnings_quality_score ?? 0,
+            growth: s.growth_score ?? 0,
+            trend: s.trend_score ?? 0,
+            momentum: s.momentum_score ?? 0,
+            health: s.health_score ?? 0,
+            consensus: s.consensus_score ?? 0,
+            risk: s.risk_score ?? 0,
           });
         } else { setScoresError(true); }
       })
@@ -66,7 +69,7 @@ export default function FiveDimRating({ selectedStock, stocks = [], onSelectStoc
   }, [code]);
 
   // 仅使用后端真实数据
-  const displayScores = realScores || { valuation: 0, profitability: 0, technical: 0, capitalFlow: 0, prosperity: 0 };
+  const displayScores = realScores || { valuation: 0, earningsQuality: 0, growth: 0, trend: 0, momentum: 0, health: 0, consensus: 0, risk: 0 };
 
   const handleAiDecide = async () => {
     setAiDeciding(true);
@@ -82,36 +85,28 @@ export default function FiveDimRating({ selectedStock, stocks = [], onSelectStoc
   };
 
   const dimensions = [
-    { key: 'valuation', name: '估值水平', val: displayScores.valuation, color: 'text-cyan-400', desc: '估值越低，分值越高（估值安全边际强）' },
-    { key: 'profitability', name: '盈利能力', val: displayScores.profitability, color: 'text-amber-400', desc: 'ROE及毛利率维持行业核心竞争力' },
-    { key: 'technical', name: '技术形态', val: displayScores.technical, color: 'text-rose-400', desc: '中短期均线多头趋势、突破与支撑强度' },
-    { key: 'capitalFlow', name: '资金流向', val: displayScores.capitalFlow, color: 'text-red-400', desc: '主力资金、北向资金或游资的实时净买额' },
-    { key: 'prosperity', name: '行业景气', val: displayScores.prosperity, color: 'text-emerald-400', desc: '行业宏观生命周期、产业政策及排产热度' },
+    { key: 'valuation', name: '估值水平', val: displayScores.valuation, max: 15, color: 'text-cyan-600', desc: '行业相对PE/PB+PEG，越低越安全' },
+    { key: 'earningsQuality', name: '盈利质量', val: displayScores.earningsQuality, max: 20, color: 'text-amber-500', desc: 'ROE+经营现金流/利润+毛利率稳定性' },
+    { key: 'growth', name: '成长性', val: displayScores.growth, max: 15, color: 'text-emerald-500', desc: '营收3年CAGR+净利增速+研发投入' },
+    { key: 'trend', name: '技术趋势', val: displayScores.trend, max: 15, color: 'text-rose-500', desc: 'MA排列+MACD+RSI多空判断' },
+    { key: 'momentum', name: '动量资金', val: displayScores.momentum, max: 10, color: 'text-orange-500', desc: '量比+换手率+量价配合' },
+    { key: 'health', name: '财务健康', val: displayScores.health, max: 10, color: 'text-blue-500', desc: '负债率+流动比率+利息覆盖' },
+    { key: 'consensus', name: '机构共识', val: displayScores.consensus, max: 10, color: 'text-purple-500', desc: '北向持仓+融资余额+资金趋势' },
+    { key: 'risk', name: '风险控制', val: displayScores.risk, max: 5, color: 'text-slate-500', desc: '最大回撤+波动率' },
   ];
 
-  const size = 260; const center = size / 2; const maxVal = 100; const radius = center - 40;
-  const angles = [-Math.PI / 2, -Math.PI / 2 + (2 * Math.PI) / 5, -Math.PI / 2 + (4 * Math.PI) / 5, -Math.PI / 2 + (6 * Math.PI) / 5, -Math.PI / 2 + (8 * Math.PI) / 5];
-  const gridPaths = [0.25, 0.5, 0.75, 1].map((lvl) => angles.map((a) => `${center + radius * lvl * Math.cos(a)},${center + radius * lvl * Math.sin(a)}`).join(' '));
-  const axisLines = angles.map((a) => ({ x2: center + radius * Math.cos(a), y2: center + radius * Math.sin(a) }));
-  const actualPointsList = [displayScores.valuation, displayScores.profitability, displayScores.technical, displayScores.capitalFlow, displayScores.prosperity];
-  const actualPoints = angles.map((a, i) => { const r = radius * (actualPointsList[i] / maxVal); return `${center + r * Math.cos(a)},${center + r * Math.sin(a)}`; }).join(' ');
-  const textOffsets = [
-    { x: center, y: center - radius - 15, anchor: 'middle' }, { x: center + radius + 10, y: center - radius / 3, anchor: 'start' },
-    { x: center + radius / 2, y: center + radius / 1.5 + 15, anchor: 'start' }, { x: center - radius / 2, y: center + radius / 1.5 + 15, anchor: 'end' },
-    { x: center - radius - 10, y: center - radius / 3, anchor: 'end' },
-  ];
+  const avgScore = realScores ? Math.round(dimensions.reduce((s, d) => s + d.val, 0)) : 0;
 
   const filteredStocks = searchQuery.trim()
     ? stocks.filter((s) => s.code.includes(searchQuery) || s.name.includes(searchQuery) || s.code.toLowerCase().includes(searchQuery.toLowerCase()))
     : stocks;
-  const averageScore = realScores ? Math.round(actualPointsList.reduce((a, b) => a + b, 0) / 5) : 0;
 
   return (
     <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm hover:shadow-md hover:border-slate-300 transition" id="five-dim-rating-module">
-      <h2 className="text-lg font-bold text-slate-850 flex items-center gap-2 mb-1"><Award className="w-5 h-5 text-red-500" />五维评分诊股</h2>
+      <h2 className="text-lg font-bold text-slate-850 flex items-center gap-2 mb-1"><Award className="w-5 h-5 text-red-500" />七维量化诊断 V5.0</h2>
       <p className="text-xs text-slate-500 mb-5">
         当前选中：<strong className="text-red-500 font-bold">{name} ({code})</strong>
-        {scoresLoading ? ' · 加载中...' : scoresError ? ' · 该股票暂无多因子历史量化评分，请在后端先执行调度跑批：python scheduler/daily_job.py --scores' : ` · ${averageScore}分综合评定`}
+        {scoresLoading ? ' · 加载中...' : scoresError ? ' · 该股票暂无多因子历史量化评分，请在后端先执行调度跑批：python scheduler/daily_job.py --scores' : ` · ${avgScore}分综合评定`}
       </p>
 
       {/* 搜索与AI决策工具栏 */}
@@ -140,8 +135,8 @@ export default function FiveDimRating({ selectedStock, stocks = [], onSelectStoc
                 </thead>
                 <tbody className="divide-y divide-slate-150">
                   {filteredStocks.map((st) => {
-                    const vs = st.scores?.valuation ?? 0; const ts = st.scores?.technical ?? 0;
-                    const avg = Math.round(((st.scores?.valuation ?? 0) + (st.scores?.profitability ?? 0) + (st.scores?.technical ?? 0) + (st.scores?.capitalFlow ?? 0) + (st.scores?.prosperity ?? 0)) / 5);
+                    const vs = st.scores?.valuation ?? 0; const ts = st.scores?.trend ?? 0;
+                    const avg = Math.round(((st.scores?.valuation ?? 0) + (st.scores?.earningsQuality ?? 0) + (st.scores?.growth ?? 0) + (st.scores?.trend ?? 0) + (st.scores?.momentum ?? 0) + (st.scores?.health ?? 0) + (st.scores?.consensus ?? 0) + (st.scores?.risk ?? 0)));
                     const isSel = st.code === code;
                     return (
                       <tr key={st.code} className={`hover:bg-slate-50/60 transition cursor-pointer ${isSel ? 'bg-red-50/50' : ''}`} onClick={() => onSelectStockCode && onSelectStockCode(st.code)}>
@@ -187,43 +182,31 @@ export default function FiveDimRating({ selectedStock, stocks = [], onSelectStoc
         </div>
       )}
 
-      {/* 雷达图 + 进度条 */}
-      <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-center">
-        <div className="md:col-span-6 flex flex-col items-center">
-          <div className="relative">
-            <svg width={size} height={size} className="overflow-visible select-none">
-              {gridPaths.map((p, i) => (<polygon key={i} points={p} fill="none" stroke="#e2e8f0" strokeWidth="0.8" strokeDasharray="3,3" />))}
-              {axisLines.map((l, i) => (<line key={i} x1={center} y1={center} x2={l.x2} y2={l.y2} stroke="#e2e8f0" strokeWidth="1" />))}
-              <polygon points={actualPoints} fill="rgba(239, 68, 68, 0.18)" stroke="#ef4444" strokeWidth="2.2" className="transition-all duration-500 ease-in-out" />
-              {angles.map((a, i) => {
-                const sr = radius * (actualPointsList[i] / maxVal);
-                return (<circle key={i} cx={center + sr * Math.cos(a)} cy={center + sr * Math.sin(a)} r="4" className="fill-red-500 stroke-white stroke-2 transition-all duration-500" />);
-              })}
-              {dimensions.map((dim, i) => (
-                <g key={i}>
-                  <text x={textOffsets[i].x} y={textOffsets[i].y} fill="#475569" fontSize="11" fontWeight="bold" textAnchor={textOffsets[i].anchor}>{dim.name}</text>
-                  <text x={textOffsets[i].x} y={textOffsets[i].y + 11} fill="#ef4444" fontSize="10" fontFamily="monospace" fontWeight="bold" textAnchor={textOffsets[i].anchor}>{dim.val}分</text>
-                </g>
-              ))}
-            </svg>
-            <div className="absolute top-[41%] left-[44%] text-center pointer-events-none">
-              <span className="text-[10px] text-slate-400 block">综合均分</span>
-              <span className="text-xl font-black font-mono text-red-555">{averageScore}</span>
+      {/* 八维评分总览 */}
+      <div className="bg-white border border-slate-200 rounded-xl p-4 mb-4 text-center shadow-sm">
+        <span className="text-[10px] text-slate-400 block">综合评分</span>
+        <span className="text-3xl font-black font-mono text-red-600">{avgScore}</span>
+        <span className="text-xs text-slate-400"> / 100</span>
+        <div className="mt-2 grid grid-cols-4 gap-1 text-[10px] text-slate-500">
+          <span>基本面 60%</span><span>市场行为 30%</span><span>机构共识 10%</span><span></span>
+        </div>
+      </div>
+
+      {/* 维度进度条 */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {dimensions.map((dim) => (
+          <div key={dim.key} className="bg-white border border-slate-200 rounded-lg p-3 shadow-sm hover:shadow-md transition">
+            <div className="flex justify-between items-center mb-1.5">
+              <span className="text-xs font-bold text-slate-700">{dim.name}</span>
+              <span className="text-xs font-mono font-black text-red-600">{dim.val} <span className="text-[9px] font-normal text-slate-400">/ {dim.max}</span></span>
             </div>
+            <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+              <div className="bg-red-500 h-full rounded-full transition-all duration-700"
+                style={{ width: `${Math.min(100, dim.val / dim.max * 100)}%` }}></div>
+            </div>
+            <div className="text-[10px] text-slate-400 mt-1.5 leading-tight">{dim.desc}</div>
           </div>
-        </div>
-        <div className="md:col-span-6 flex flex-col gap-3.5">
-          {dimensions.map((dim) => (
-            <div key={dim.key} className="bg-slate-50/50 p-2.5 rounded-lg border border-slate-200/80 hover:border-slate-250 transition shadow-3xs">
-              <div className="flex justify-between items-center mb-1">
-                <span className="text-xs font-semibold text-slate-700 flex items-center gap-1.5"><span className={`w-1.5 h-1.5 rounded-full ${dim.val > 75 ? 'bg-red-500' : 'bg-slate-400'}`}></span>{dim.name}</span>
-                <span className="text-xs font-mono font-bold text-red-600">{dim.val} <span className="text-[9px] font-normal text-slate-400">/ 100</span></span>
-              </div>
-              <div className="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden"><div className="bg-red-500 h-full rounded-full transition-all duration-700" style={{ width: `${dim.val}%` }}></div></div>
-              <div className="text-[10px] text-slate-500 mt-1">{dim.desc}</div>
-            </div>
-          ))}
-        </div>
+        ))}
       </div>
     </div>
   );

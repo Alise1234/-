@@ -7,13 +7,13 @@ import React, { useState, useEffect } from 'react';
 import { StockInfo, MarketIndex, SectorHeatInfo, MarketSentiment, PortfolioHolding } from './types';
 // 零假数据：所有行情来自 API 真实拉取
 
-// 导入特色子板块模块组件
-import DataCenter from './components/DataCenter';
+// 导入特色子板块模块组件 V4.0
+import SmartScreener from './components/SmartScreener';
+import MarketCenter from './components/MarketCenter';
 import StockPool from './components/StockPool';
 import FiveDimRating from './components/FiveDimRating';
 import SignalSystem from './components/SignalSystem';
 import PositionSystem from './components/PositionSystem';
-import SectorHeat from './components/SectorHeat';
 import LeaderIdentification from './components/LeaderIdentification';
 import SentimentCycle from './components/SentimentCycle';
 import BacktestSystem from './components/BacktestSystem';
@@ -22,10 +22,9 @@ import PortfolioManagement from './components/PortfolioManagement';
 import { API_BASE } from './services/api';
 
 import {
-  TrendingUp, Award, Coins, HelpCircle, Activity,
-  LayoutDashboard, BarChart2, Flame, Radio, Layers,
+  Award, BarChart2, Radio, Layers,
   Compass, Crown, Briefcase, Shield, Brain, LineChart,
-  Sparkles, Wallet, ChevronRight, RefreshCw, Menu, X, ArrowUpRight, TrendingDown
+  ChevronRight, RefreshCw, Menu, X, TrendingDown
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -58,7 +57,7 @@ export default function App() {
   const [lastPollTime, setLastPollTime] = useState<string>('--:--:--');
 
   // 4. 导航及菜单抽屉状态
-  const [activeMenu, setActiveMenu] = useState<string>('OVERVIEW');
+  const [activeMenu, setActiveMenu] = useState<string>('SMART_SCREENER');
   const [mobileOpen, setMobileOpen] = useState<boolean>(false);
 
   // === 核心：15 秒真实行情轮询（价格从实时行情，评分从数据库，无写死假数据） ===
@@ -100,7 +99,7 @@ export default function App() {
               volume: parseFloat(s.成交量 || s.f5 || '0') || 0,
               high: parseFloat(s.最高 || s.f15 || '0') || currentPrice,
               low: parseFloat(s.最低 || s.f16 || '0') || currentPrice,
-              scores: { valuation: 0, profitability: 0, technical: 0, capitalFlow: 0, prosperity: 0 },
+              scores: { valuation: 0, earningsQuality: 0, growth: 0, trend: 0, momentum: 0, health: 0, consensus: 0, risk: 0 },
               signal: 'HOLD' as const,
               signalReason: '评分加载中...',
               isLeader: false,
@@ -132,10 +131,13 @@ export default function App() {
                         ...st,
                         scores: {
                           valuation: sc.valuation_score || 0,
-                          profitability: sc.valuation_score || 0,
-                          technical: sc.trend_score || 0,
-                          capitalFlow: sc.capital_score || 0,
-                          prosperity: sc.sentiment_score || 0,
+                          earningsQuality: sc.earnings_quality_score || 0,
+                          growth: sc.growth_score || 0,
+                          trend: sc.trend_score || 0,
+                          momentum: sc.momentum_score || 0,
+                          health: sc.health_score || 0,
+                          consensus: sc.consensus_score || 0,
+                          risk: sc.risk_score || 0,
                         },
                         signalReason: `${sc.calc_date || '实时'}`,
                         signal: (sc.total_score ?? 0) >= 80 ? 'BUY' : (sc.total_score ?? 0) >= 60 ? 'HOLD' : 'SELL',
@@ -264,7 +266,7 @@ export default function App() {
               volume: parseFloat(rawItem.成交量 || rawItem.f5 || '0') || 0,
               high: parseFloat(rawItem.最高 || rawItem.f15 || '0') || currentPrice,
               low: parseFloat(rawItem.最低 || rawItem.f16 || '0') || currentPrice,
-              scores: { valuation: 60, profitability: 60, technical: 60, capitalFlow: 60, prosperity: 60 },
+              scores: { valuation: 8, earningsQuality: 10, growth: 8, trend: 8, momentum: 5, health: 5, consensus: 5, risk: 3 },
               signal: 'HOLD',
               signalReason: '检索同步：正在从多维分析数据库拉取实时量化评分因子...',
               isLeader: false,
@@ -280,12 +282,15 @@ export default function App() {
                   if (sc && sc.total_score != null) {
                     newlyFetchedStock.scores = {
                       valuation: sc.valuation_score || 60,
-                      profitability: sc.valuation_score || 60,
-                      technical: sc.trend_score || 60,
-                      capitalFlow: sc.capital_score || 60,
-                      prosperity: sc.sentiment_score || 60,
+                      earningsQuality: sc.earnings_quality_score || 60,
+                      growth: sc.growth_score || 60,
+                      trend: sc.trend_score || 60,
+                      momentum: sc.momentum_score || 60,
+                      health: sc.health_score || 60,
+                      consensus: sc.consensus_score || 60,
+                      risk: sc.risk_score || 60,
                     };
-                    newlyFetchedStock.signalReason = `主力五维因子分析：趋势因子 ${sc.trend_score || 0}，估值因子 ${sc.valuation_score || 0}，多维评估处于推荐等级。`;
+                    newlyFetchedStock.signalReason = `七维因子分析 V5.0 — 估值${sc.valuation_score||0}/15 盈利${sc.earnings_quality_score||0}/20 成长${sc.growth_score||0}/15 趋势${sc.trend_score||0}/15 质量${sc.health_score||0}/10`;
                     newlyFetchedStock.signal = (sc.total_score ?? 60) >= 80 ? 'BUY' : (sc.total_score ?? 60) >= 55 ? 'HOLD' : 'SELL';
                   }
                 }
@@ -450,17 +455,15 @@ export default function App() {
     ? stocks.find((s) => s.code.replace(/^(sh|sz|bj)/i, '') === cleanSelectedCode)
     : undefined;
 
-  // 子菜单/功能划分定义
+  // 子菜单/功能划分定义 V4.0
   const menuCategories = [
-    { title: '决策中心', items: [
-      { id: 'OVERVIEW', name: '大盘全景看板', desc: '宏观行情、持仓及诊股概览', icon: LayoutDashboard },
+    { title: '核心功能', items: [
+      { id: 'SMART_SCREENER', name: '智能因子选股', desc: '多因子排名 + 资金面 + 消息面', icon: Brain },
+      { id: 'MARKET_CENTER', name: '实时行情中心', desc: '个股检索 + 板块动量 + 资金流向', icon: BarChart2 },
     ]},
-    { title: '行情数据', items: [
-      { id: 'DATA_CENTER', name: '数据行情中心', desc: '个股检索及实时量化排列', icon: BarChart2 },
-      { id: 'SECTOR_HEAT', name: '行业板块资金', desc: '细分主力流入与资金热度', icon: Flame },
-    ]},
-    { title: '个股研判', items: [
-      { id: 'FIVE_DIM', name: '五维评分量化', desc: '诊断个股各项多因子分值', icon: Award },
+    { title: '量化工具', items: [
+      { id: 'BACKTEST', name: '策略量化回测', desc: '多策略历史拟合 + 止损止盈', icon: LineChart },
+      { id: 'FIVE_DIM', name: '七维量化诊断', desc: '基本面+市场+机构共识全维度', icon: Award },
       { id: 'SIGNALS', name: '双限共振信号', desc: '筹码、均线及主力变动预警', icon: Radio },
     ]},
     { title: '特色策略', items: [
@@ -472,9 +475,8 @@ export default function App() {
       { id: 'PORTFOLIO', name: '实盘自选投资', desc: '资金建仓、交易记录与组合盈亏', icon: Briefcase },
       { id: 'POSITION', name: '当前仓位管理', desc: '动态凯利公式控仓配资量化建议', icon: Shield },
     ]},
-    { title: '高级量化工具', items: [
+    { title: 'AI 工具', items: [
       { id: 'AI_ANALYSIS', name: '智能 AI 投顾', desc: '自选池大模型组合优化报告', icon: Brain },
-      { id: 'BACKTEST', name: '策略多段回测', desc: '个股与选股模型历史实算拟合', icon: LineChart },
     ]},
   ];
 
@@ -591,83 +593,21 @@ export default function App() {
           <AnimatePresence mode="wait">
             <motion.div key={activeMenu} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} transition={{ duration: 0.18 }} className="h-full">
 
-              {/* 5.1 大盘全景看板 */}
-              {activeMenu === 'OVERVIEW' && (
-                <div className="space-y-6">
-                  <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm hover:shadow-md hover:border-slate-300 transition">
-                    <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-4">
-                      <div><h2 className="text-base md:text-lg font-bold text-slate-900 flex items-center gap-1.5"><Compass className="w-5 h-5 text-red-500 animate-spin" style={{ animationDuration: '8s' }} />大盘全局风控情绪沙盘</h2><p className="text-xs md:text-sm text-slate-500 mt-1">评估当前A股大盘所处的活跃度及周期演进阶段</p></div>
-                      <div className="flex items-center gap-2"><span className="text-xs md:text-sm font-semibold text-slate-600">周期阶段:</span><span className={`text-xs md:text-sm font-black px-2.5 py-1 rounded-full ${sentiment.phase === '狂热期' ? 'bg-red-550/10 text-red-600 border border-red-500/20' : sentiment.phase === '冰点期' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' : sentiment.phase === '启动期' ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20' : 'bg-slate-500/10 text-slate-600 border border-slate-200'}`}>{sentiment.phase}</span></div>
-                    </div>
-                    <p className="text-xs md:text-sm text-slate-700 leading-relaxed bg-slate-50 p-4 rounded-lg border border-slate-200 font-medium">{sentiment.description}</p>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-4">
-                      <div className="text-center p-3 bg-slate-100/50 border border-slate-200 rounded-lg"><span className="text-xs font-bold text-slate-500 block mb-1">两市上涨比率</span><span className="text-base md:text-lg font-mono font-black text-red-600">{sentiment.boardRatio}%</span></div>
-                      <div className="text-center p-3 bg-slate-100/50 border border-slate-200 rounded-lg"><span className="text-xs font-bold text-slate-500 block mb-1">恐慌贪婪分值</span><span className="text-base md:text-lg font-mono font-black text-amber-600">{sentiment.fearGreedIndex} / 100</span></div>
-                      <div className="text-center p-3 bg-slate-100/50 border border-slate-200 rounded-lg"><span className="text-xs font-bold text-slate-500 block mb-1">涨停数量</span><span className="text-base md:text-lg font-mono font-black text-slate-800">{sentiment.limitUpCount} 家</span></div>
-                      <div className="text-center p-3 bg-slate-100/50 border border-slate-200 rounded-lg"><span className="text-xs font-bold text-slate-550 block mb-1">总成交额</span><span className="text-base md:text-lg font-mono font-black text-slate-900">{(sentiment.totalTurnover / 10).toFixed(1)} 百亿</span></div>
-                    </div>
-                    <div className="mt-4 flex justify-end"><button onClick={() => setActiveMenu('SENTIMENT')} className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 border border-slate-200 text-xs md:text-sm font-bold rounded-lg text-red-600 transition flex items-center gap-1 cursor-pointer">调整周期阶段与推演 <ChevronRight className="w-3.5 h-3.5" /></button></div>
-                  </div>
-
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm hover:shadow-md hover:border-slate-300 transition flex flex-col justify-between">
-                      {selectedStock ? (
-                        <div>
-                          <div className="flex justify-between items-start mb-3"><div><span className="text-xs font-bold text-slate-500 uppercase tracking-widest block">当前焦点关注个股评分</span><h3 className="text-lg md:text-xl font-black text-slate-900 mt-1">{selectedStock.name} <span className="text-xs md:text-sm font-mono font-normal text-slate-405">{selectedStock.code}</span></h3></div><span className={`text-xs md:text-sm font-black px-2.5 py-1 rounded ${selectedStock.signal === 'BUY' ? 'bg-red-500/10 text-red-600' : selectedStock.signal === 'SELL' ? 'bg-emerald-500/10 text-emerald-600' : 'bg-slate-100 text-slate-600'}`}>信号: {selectedStock.signal === 'BUY' ? '建仓买入' : selectedStock.signal === 'SELL' ? '避险卖出' : '建议持有'}</span></div>
-                          <div className="bg-slate-50 border border-slate-150 p-4 rounded-lg mb-4 hover:bg-slate-100/50 transition"><span className="text-xs font-bold text-slate-500 block mb-1">智能评估因子分析:</span><p className="text-xs md:text-sm text-slate-700 leading-relaxed font-semibold">{selectedStock.signalReason}</p></div>
-                          <div className="grid grid-cols-5 gap-2 text-center">
-                            {Object.entries(selectedStock.scores).map(([k, val]) => (
-                              <div key={k} className="bg-slate-50 p-2.5 rounded-lg border border-slate-150"><span className="text-[10px] md:text-xs font-bold text-slate-500 block truncate mb-1">{k === 'valuation' ? '估值' : k === 'profitability' ? '盈利' : k === 'technical' ? '技术' : k === 'capitalFlow' ? '净流入' : '景气度'}</span><span className="text-sm font-mono font-extrabold text-slate-800">{val}</span></div>
-                            ))}
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="flex flex-col items-center justify-center py-12 text-center">
-                          <p className="text-sm text-slate-500 font-semibold">暂无数据</p>
-                          <p className="text-xs text-slate-400 mt-1">行情加载中，或请从「数据行情中心」选择股票</p>
-                        </div>
-                      )}
-                      {selectedStock && (
-                      <div className="mt-5 pt-3 border-t border-slate-150 flex justify-between gap-3 items-center">
-                        <span className="text-xs md:text-sm font-semibold text-slate-505 font-mono">PE: <span className="text-slate-800 font-extrabold">{selectedStock.pe}</span> · ROE: <span className="text-slate-800 font-extrabold">{selectedStock.roe}%</span></span>
-                        <div className="flex gap-2"><button onClick={() => setActiveMenu('FIVE_DIM')} className="px-3.5 py-1.5 bg-slate-105 hover:bg-slate-205 border border-slate-205 text-xs font-bold rounded-lg transition text-slate-700">探查五维评分</button><button onClick={() => setActiveMenu('SIGNALS')} className="px-3.5 py-1.5 bg-red-600 hover:bg-red-700 text-xs font-bold rounded-lg text-white font-medium transition">观察因子共振</button></div>
-                      </div>
-                      )}
-                    </div>
-
-                    <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm hover:shadow-md hover:border-slate-300 transition flex flex-col justify-between">
-                      <div><span className="text-xs font-bold text-slate-500 uppercase tracking-widest block">当前实盘自选投资组合监控</span>
-                        <div className="mt-2 grid grid-cols-2 gap-4"><div><span className="text-xs text-slate-500 block">最新账户总资产估值</span><span className="text-lg md:text-2xl font-mono font-black text-slate-905">¥{totalAssets.toLocaleString('zh-CN', { minimumFractionDigits: 2 })}</span></div><div><span className="text-xs text-slate-500 block">持仓自选总市值</span><span className="text-lg md:text-2xl font-mono font-black text-red-600">¥{portfolioValue.toLocaleString('zh-CN', { minimumFractionDigits: 2 })}</span></div></div>
-                        <div className="mt-4 space-y-1.5"><span className="text-xs font-bold text-slate-500 block font-bold">自选重仓持股 ({portfolio.length} 只):</span>
-                          {portfolio.length === 0 ? (<p className="text-xs md:text-sm text-slate-400 py-3">暂无任何真实持股，请在实盘自选菜单下录入持仓或管理。</p>) : (
-                            <div className="max-h-[110px] overflow-y-auto space-y-1 pr-1">
-                              {portfolio.map((port) => { const yieldVal = port.currentPrice - port.buyPrice; const yieldPct = ((yieldVal / port.buyPrice) * 100).toFixed(2); const isProfit = parseFloat(yieldPct) >= 0;
-                                return (<div key={port.id} className="flex justify-between items-center text-xs md:text-sm bg-slate-50 px-3 py-2 rounded-lg border border-slate-200 hover:bg-slate-100 transition"><div className="flex items-center gap-1.5"><span className="font-extrabold text-slate-805">{port.name}</span><span className="text-xs text-slate-500 font-mono">{port.code}</span></div><div className="flex items-center gap-4"><span className="text-slate-600 font-mono">{port.shares} 股</span><span className={`font-mono font-bold ${isProfit ? 'text-red-500' : 'text-emerald-600'}`}>{isProfit ? '+' : ''}{yieldPct}%</span></div></div>);
-                              })}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                      <div className="mt-4 pt-3 border-t border-slate-205 flex justify-between items-center"><span className="text-xs md:text-sm font-bold text-slate-700">可用资金: ¥{cash.toLocaleString('zh-CN', { minimumFractionDigits: 2 })}</span><button onClick={() => setActiveMenu('PORTFOLIO')} className="px-3.5 py-1.5 bg-red-50 hover:bg-red-100 border border-red-200 text-xs font-bold rounded-lg text-red-600 transition flex items-center gap-1 cursor-pointer">管理自选建仓仓位 <ChevronRight className="w-3.5 h-3.5" /></button></div>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                    <div className="bg-white border border-slate-200 shadow-sm p-5 rounded-xl transition hover:shadow-md hover:border-slate-300"><h4 className="text-xs md:text-sm font-bold text-slate-800 flex items-center gap-1.5 mb-2"><Crown className="w-3.5 h-3.5 text-amber-500" />今日龙头接力连板高标</h4><p className="text-xs text-slate-500 mb-3">追踪当日两市资金高度抱团的大妖股梯队：</p><button onClick={() => setActiveMenu('LEADERS')} className="w-full text-left py-2 px-3 bg-slate-50 hover:bg-slate-100 rounded border border-slate-200 text-xs md:text-sm text-red-600 flex justify-between items-center transition cursor-pointer font-bold"><span>点击开始妖股判定扫描</span><ChevronRight className="w-3.5 h-3.5" /></button></div>
-                    <div className="bg-white border border-slate-200 shadow-sm p-5 rounded-xl transition hover:shadow-md hover:border-slate-300"><h4 className="text-xs md:text-sm font-bold text-slate-800 flex items-center gap-1.5 mb-2"><Shield className="w-3.5 h-3.5 text-red-500" />凯利公式仓位风控决策</h4><p className="text-xs text-slate-500 mb-3">由个股参数与大盘情绪精算出的最佳安全配比：</p><button onClick={() => setActiveMenu('POSITION')} className="w-full text-left py-2 px-3 bg-slate-50 hover:bg-slate-100 rounded border border-slate-200 text-xs md:text-sm text-red-600 flex justify-between items-center transition cursor-pointer font-bold"><span>查看最优配资分配比例</span><ChevronRight className="w-3.5 h-3.5" /></button></div>
-                    <div className="bg-white border border-slate-200 shadow-sm p-5 rounded-xl transition hover:shadow-md hover:border-slate-300"><h4 className="text-xs md:text-sm font-bold text-slate-800 flex items-center gap-1.5 mb-2"><LineChart className="w-3.5 h-3.5 text-blue-500" />个股策略多段量化回测</h4><p className="text-xs text-slate-500 mb-3">分析该股在特定时间周期内的累积收益拟合曲线：</p><button onClick={() => setActiveMenu('BACKTEST')} className="w-full text-left py-2 px-3 bg-slate-50 hover:bg-slate-100 rounded border border-slate-200 text-xs md:text-sm text-red-600 flex justify-between items-center transition cursor-pointer font-bold"><span>调用历史自算多段拟合器</span><ChevronRight className="w-3.5 h-3.5" /></button></div>
-                  </div>
-                </div>
+              {/* 智能因子选股 */}
+              {activeMenu === 'SMART_SCREENER' && (
+                <SmartScreener stocks={stocks} indices={indices} sectors={sectors} sentiment={sentiment}
+                  selectedStockCode={selectedStockCode}
+                  onSelectStock={setSelectedStockCode}
+                  onAddToPool={handleAddStockToPool} />
               )}
 
-              {/* 5.2 数据行情中心 */}
-              {activeMenu === 'DATA_CENTER' && (
-                <DataCenter stocks={stocks} indices={indices} selectedStockCode={selectedStockCode}
-                  onSelectStock={setSelectedStockCode} onAddStockToPool={handleAddStockToPool} />
+              {/* 行情中心 (合并 DATA_CENTER + SECTOR_HEAT) */}
+              {activeMenu === 'MARKET_CENTER' && (
+                <MarketCenter stocks={stocks} indices={indices} sectors={sectors}
+                  selectedStockCode={selectedStockCode}
+                  onSelectStock={setSelectedStockCode}
+                  onAddStockToPool={handleAddStockToPool} />
               )}
-
-              {/* 5.3 行业板块热度 */}
-              {activeMenu === 'SECTOR_HEAT' && (<SectorHeat sectors={sectors} />)}
 
               {/* 5.4 五维评分 */}
               {activeMenu === 'FIVE_DIM' && (

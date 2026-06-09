@@ -8,11 +8,14 @@ export interface MarketIndex {
 }
 
 export interface StockScores {
-  valuation: number;      // 估值水平 (0-100)
-  profitability: number;  // 盈利能力 (0-100)
-  technical: number;      // 技术形态 (0-100)
-  capitalFlow: number;    // 资金流向 (0-100)
-  prosperity: number;     // 行业景气度 (0-100)
+  valuation: number;          // 估值水平 (0-15)
+  earningsQuality: number;    // 盈利质量 (0-20)
+  growth: number;             // 成长性 (0-15)
+  trend: number;              // 趋势评分 (0-15)
+  momentum: number;           // 动量评分 (0-10)
+  health: number;             // 财务健康 (0-10)
+  consensus: number;          // 机构共识 (0-10)
+  risk: number;               // 风险评分 (0-5)
 }
 
 export type TechnicalSignal = 'BUY' | 'SELL' | 'HOLD';

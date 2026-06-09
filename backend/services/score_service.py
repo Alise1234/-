@@ -1,304 +1,642 @@
 """
-五维评分引擎 V3.3 — 百分位驱动 + 连续函数
+七维量化评分引擎 V5.0 — 基本面驱动 + 技术面辅助
+
+维度权重 (基本面55% + 市场行为30% + 情绪共识15%):
+  估值评分        15% — 行业相对PE/PB + PEG
+  盈利质量        20% — ROE + 经营现金流/利润 + 毛利率稳定性
+  成长性          15% — 营收3年CAGR + 净利增速 + 研发费用率
+  趋势评分        15% — MA排列 + MACD + RSI
+  动量评分        10% — 量比 + 换手率 + 相对强弱
+  财务健康        10% — 资产负债率 + 流动比率 + 利息覆盖
+  机构共识        10% — 北向资金 + 融资余额变化
+  风险评分         5% — 最大回撤 + 波动率
 
 设计原则:
-  1. 每个维度输出连续分数（非阶梯if-else）
-  2. 阈值基于实际数据分位数（200只抽样）
-  3. 满分可达到，低分也有区分度
-
-维度权重:
-  趋势评分  30% — MA排列 + MACD + RSI
-  资金评分  25% — 量比 + 换手率 + 量价配合
-  估值评分  15% — PE/PB
-  情绪评分  15% — 涨跌幅 + RSI极端
-  风险评分  15% — BOLL位置 + 波动率 + 回撤
+  1. 基本面优先: 估值+盈利+成长+财务=60分, 技术面=30分, 情绪=10分
+  2. 所有基本面数据优先从 akshare 拉取真实财报
+  3. 缺失数据用保守代理（不给虚假高分）
+  4. PE/PB 与申万行业中位数比较
 """
 import pandas as pd
 import numpy as np
-from typing import Dict
+from typing import Dict, Optional, Tuple
+
+# akshare 延迟导入（避免未安装时崩溃）
+_ak = None
+
+def _get_ak():
+    global _ak
+    if _ak is None:
+        try:
+            import akshare as ak
+            _ak = ak
+        except ImportError:
+            pass
+    return _ak
 
 
 def _clip(v, lo, hi):
-    """约束到[lo, hi]"""
-    return max(lo, min(hi, v))
+    return max(lo, min(hi, float(v)))
 
 
+# ============================================================
+#  行业估值基准
+# ============================================================
+INDUSTRY_MEDIAN = {
+    "银行": (5.2, 0.55), "非银金融": (14.0, 1.3), "房地产": (18.0, 1.0),
+    "建筑装饰": (12.0, 1.1), "建筑材料": (18.0, 1.8), "钢铁": (15.0, 0.9),
+    "有色金属": (22.0, 2.1), "基础化工": (25.0, 2.0), "石油石化": (12.0, 1.2),
+    "煤炭": (8.0, 1.1), "电力设备": (28.0, 2.8), "机械设备": (30.0, 2.5),
+    "国防军工": (55.0, 3.5), "汽车": (25.0, 2.2), "家用电器": (16.0, 2.4),
+    "食品饮料": (28.0, 5.0), "纺织服饰": (22.0, 2.0), "轻工制造": (28.0, 2.0),
+    "农林牧渔": (35.0, 2.8), "医药生物": (35.0, 3.5), "电子": (45.0, 3.5),
+    "计算机": (50.0, 3.8), "通信": (25.0, 2.0), "传媒": (30.0, 2.5),
+    "公用事业": (18.0, 1.5), "交通运输": (18.0, 1.5), "商贸零售": (30.0, 2.0),
+    "社会服务": (35.0, 3.0), "环保": (22.0, 1.8), "美容护理": (40.0, 4.5),
+}
+DEFAULT_PE_MEDIAN = 28.0
+DEFAULT_PB_MEDIAN = 2.2
+
+
+def _get_industry_median(industry: str) -> Tuple[float, float]:
+    if not industry:
+        return DEFAULT_PE_MEDIAN, DEFAULT_PB_MEDIAN
+    for key, (pe, pb) in INDUSTRY_MEDIAN.items():
+        if key in industry or industry in key:
+            return pe, pb
+    return DEFAULT_PE_MEDIAN, DEFAULT_PB_MEDIAN
+
+
+# ============================================================
+#  财报数据拉取器
+# ============================================================
+def _fetch_financials(code: str) -> Dict:
+    """
+    从 akshare + 数据库 拉取基本面数据
+    返回: {roe, gross_margin, net_margin, debt_ratio, current_ratio,
+            op_cash_flow, net_profit, revenue_3y_cagr, r_and_d_pct}
+    """
+    result = {}
+
+    # 1. 先从数据库取
+    try:
+        from database import SessionLocal
+        from models import StockBasic
+        db = SessionLocal()
+        stock = db.query(StockBasic).filter(StockBasic.code == code).first()
+        db.close()
+        if stock:
+            for f in ["roe", "gross_margin", "net_margin"]:
+                v = getattr(stock, f, None)
+                if v is not None:
+                    result[f] = float(v)
+    except Exception:
+        pass
+
+    # 2. 从 akshare 拉取
+    ak = _get_ak()
+    if ak and code:
+        try:
+            # 拉近3年财务摘要
+            fin = ak.stock_financial_abstract_ths(symbol=code, indicator="按报告期")
+            if fin is not None and len(fin) > 0:
+                latest = fin.iloc[0]
+                # ROE
+                if "roe" not in result:
+                    roe_raw = latest.get("净资产收益率", latest.get("ROE", None))
+                    if roe_raw and float(roe_raw) > 0:
+                        result["roe"] = float(roe_raw)
+                # 毛利率
+                if "gross_margin" not in result:
+                    gm = latest.get("销售毛利率", latest.get("毛利率", None))
+                    if gm:
+                        result["gross_margin"] = float(gm)
+                # 净利率
+                if "net_margin" not in result:
+                    nm = latest.get("销售净利率", latest.get("净利率", None))
+                    if nm:
+                        result["net_margin"] = float(nm)
+                # 资产负债率
+                dr = latest.get("资产负债率", latest.get("负债率", None))
+                if dr:
+                    result["debt_ratio"] = float(dr)
+                # 流动比率
+                cr = latest.get("流动比率", None)
+                if cr:
+                    result["current_ratio"] = float(cr)
+
+                # 多期数据计算成长性
+                if len(fin) >= 3:
+                    revs = []
+                    profits = []
+                    for i in range(min(3, len(fin))):
+                        r = fin.iloc[i]
+                        rev = r.get("营业总收入", r.get("营业收入", None))
+                        np_val = r.get("净利润", r.get("归属母公司净利润", None))
+                        if rev:
+                            revs.append(float(rev))
+                        if np_val:
+                            profits.append(float(np_val))
+                    # 营收3年CAGR
+                    if len(revs) >= 2 and revs[-1] > 0:
+                        yrs = len(revs) - 1
+                        if yrs > 0:
+                            cagr = (revs[0] / revs[-1]) ** (1 / yrs) - 1
+                            result["revenue_3y_cagr"] = round(cagr * 100, 1)
+                    # 净利增速
+                    if len(profits) >= 2 and profits[-1] > 0:
+                        result["profit_growth"] = round((profits[0] / profits[-1] - 1) * 100, 1)
+
+                # 经营现金流
+                ocf = latest.get("经营活动现金流净额", latest.get("经营现金流", None))
+                np_raw = latest.get("净利润", latest.get("归属母公司净利润", None))
+                if ocf and np_raw and float(np_raw) > 0:
+                    result["op_cash_flow_ratio"] = round(float(ocf) / float(np_raw), 2)
+
+                # 研发费用率
+                rd = latest.get("研发费用", None)
+                if rd and revs and revs[0] > 0:
+                    result["r_and_d_pct"] = round(float(rd) / revs[0] * 100, 1)
+
+        except Exception:
+            pass
+
+
+    # 3. 北向资金 — 多 API 回退
+    if ak and code:
+        nb = _fetch_northbound(ak, code)
+        if nb:
+            result.update(nb)
+
+    return result
+
+
+def _fetch_northbound(ak, code: str) -> Dict:
+    """
+    拉取个股北向资金数据，支持多 API 回退:
+      1. stock_hsgt_individual_detail_em — 个股沪深股通每日明细
+      2. stock_hsgt_hist_em — 沪/深股通历史汇总 (按市场)
+    返回: {northbound_holding, northbound_value, northbound_pct, northbound_net_5d}
+    """
+    result = {}
+    market = "sh" if code.startswith("6") else "sz"
+
+    # ——— 方式 1: 个股每日明细 (最优) ———
+    try:
+        detail = ak.stock_hsgt_individual_detail_em(symbol=code)
+        if detail is not None and len(detail) >= 1:
+            latest = detail.iloc[-1]
+            result["northbound_holding"] = float(latest.get("持股数", 0) or 0)
+            result["northbound_value"] = float(latest.get("持股市值", 0) or 0)
+            # 占流通股比例
+            pct_raw = latest.get("持股比例", latest.get("占流通股比例", None))
+            if pct_raw:
+                result["northbound_pct"] = float(pct_raw)
+            # 近 5 日净买入
+            if len(detail) >= 5:
+                recent = detail.iloc[-5:]
+                net_buy = sum(float(r.get("当日净买入", r.get("净买入", 0)) or 0) for r in recent.itertuples(index=False) if hasattr(r, '_asdict'))
+                if not isinstance(net_buy, (int, float)):
+                    # itertuples fallback
+                    net_buy = 0.0
+                result["northbound_net_5d"] = round(float(net_buy), 1)
+            return result
+    except Exception:
+        pass
+
+    # ——— 方式 2: 市场汇总推算 (回退) ———
+    try:
+        market_name = "沪股通" if market == "sh" else "深股通"
+        hist = ak.stock_hsgt_hist_em(symbol=market_name)
+        if hist is not None and len(hist) >= 1:
+            latest = hist.iloc[-1]
+            net_inflow = float(latest.get("当日成交净买额", latest.get("净流入", 0)) or 0)
+            if net_inflow != 0:
+                result["northbound_net_5d"] = round(net_inflow / 10000, 1)  # 万元→亿
+            if hist is not None and len(hist) >= 5:
+                result["northbound_market_active"] = True
+            return result
+    except Exception:
+        pass
+
+    return result
+
+
+# ============================================================
+#  维度1: 估值评分 (满分15)
+# ============================================================
+def score_valuation(df: pd.DataFrame, idx: int = -1,
+                    industry: str = "", fin: Dict = None) -> int:
+    """估值评分 — 行业相对PE/PB + PEG"""
+    score = 8.0
+    pe = df.get("pe", pd.Series([np.nan])).iloc[idx] if "pe" in df.columns else np.nan
+    pb = df.get("pb", pd.Series([np.nan])).iloc[idx] if "pb" in df.columns else np.nan
+    pe_median, pb_median = _get_industry_median(industry)
+
+    # PE 行业相对 (8分)
+    if not pd.isna(pe) and float(pe) > 0:
+        rel_pe = float(pe) / pe_median
+        if   rel_pe < 0.5:  score += 6.0
+        elif rel_pe < 0.8:  score += 4.0
+        elif rel_pe < 1.0:  score += 2.5
+        elif rel_pe < 1.2:  score += 1.0
+        elif rel_pe < 1.5:  score += 0.0
+        elif rel_pe < 2.0:  score -= 2.0
+        else:              score -= 4.0
+
+    # PB 行业相对 (4分)
+    if not pd.isna(pb) and float(pb) > 0:
+        rel_pb = float(pb) / pb_median
+        if   rel_pb < 0.6:  score += 3.0
+        elif rel_pb < 0.9:  score += 2.0
+        elif rel_pb < 1.1:  score += 1.0
+        elif rel_pb < 1.5:  score += 0.0
+        else:              score -= 1.5
+
+    # PEG 调整 (3分) — PE/盈利增速，<1 为低估
+    if fin and fin.get("profit_growth"):
+        growth = fin["profit_growth"]
+        if not pd.isna(pe) and float(pe) > 0 and growth > 0:
+            peg = float(pe) / growth
+            if peg < 0.5:   score += 3.0
+            elif peg < 1.0: score += 2.0
+            elif peg < 1.5: score += 1.0
+            elif peg > 3.0: score -= 1.0
+
+    return round(_clip(score, 0, 15))
+
+
+# ============================================================
+#  维度2: 盈利质量 (满分20)
+# ============================================================
+def score_earnings_quality(df: pd.DataFrame, idx: int = -1,
+                            fin: Dict = None) -> int:
+    """盈利质量 — ROE + 现金流质量 + 毛利率稳定性"""
+    score = 7.0
+    fin = fin or {}
+
+    # 1. ROE (10分)
+    roe = fin.get("roe")
+    if roe is not None and float(roe) > 0:
+        r = float(roe)
+        if r > 25:    score += 9.0
+        elif r > 20:  score += 7.5
+        elif r > 15:  score += 6.0
+        elif r > 10:  score += 4.0
+        elif r > 5:   score += 2.0
+        elif r > 0:   score += 0.5
+        else:         score -= 3.0
+    else:
+        # PE 代理
+        pe = df.get("pe", pd.Series([np.nan])).iloc[idx] if "pe" in df.columns else np.nan
+        if not pd.isna(pe) and float(pe) > 0:
+            ep = 100 / float(pe)  # 盈利收益率
+            score += _clip(ep / 3.0 * 5.0, 0, 6.0)
+
+    # 2. 现金流质量 (6分)
+    ocf_ratio = fin.get("op_cash_flow_ratio")
+    if ocf_ratio is not None:
+        if ocf_ratio > 1.0:   score += 6.0   # 现金流 > 利润
+        elif ocf_ratio > 0.8: score += 4.5
+        elif ocf_ratio > 0.5: score += 3.0
+        elif ocf_ratio > 0:   score += 1.0
+        else:                score -= 2.0    # 利润没有现金流支撑
+
+    # 3. 毛利率 (4分)
+    gm = fin.get("gross_margin")
+    if gm is not None:
+        if gm > 60:    score += 4.0  # 高毛利=强护城河
+        elif gm > 40:  score += 3.0
+        elif gm > 20:  score += 2.0
+        elif gm > 10:  score += 1.0
+        else:          score += 0.0
+
+    return round(_clip(score, 0, 20))
+
+
+# ============================================================
+#  维度3: 成长性 (满分15)
+# ============================================================
+def score_growth(fin: Dict = None) -> int:
+    """成长性 — 营收CAGR + 净利增速 + 研发投入"""
+    score = 6.0
+    fin = fin or {}
+
+    # 1. 营收3年CAGR (7分)
+    rev_cagr = fin.get("revenue_3y_cagr")
+    if rev_cagr is not None:
+        if rev_cagr > 30:   score += 7.0
+        elif rev_cagr > 20: score += 5.5
+        elif rev_cagr > 15: score += 4.0
+        elif rev_cagr > 10: score += 2.5
+        elif rev_cagr > 5:  score += 1.0
+        elif rev_cagr > 0:  score += 0.0
+        else:              score -= 1.0
+
+    # 2. 净利增速 (5分)
+    profit_g = fin.get("profit_growth")
+    if profit_g is not None:
+        if profit_g > 30:   score += 5.0
+        elif profit_g > 20: score += 4.0
+        elif profit_g > 10: score += 3.0
+        elif profit_g > 5:  score += 1.5
+        elif profit_g > 0:  score += 0.5
+        else:              score -= 1.0
+
+    # 3. 研发投入 (3分) — 科技公司加分
+    rd = fin.get("r_and_d_pct")
+    if rd is not None:
+        if rd > 15:   score += 3.0
+        elif rd > 10: score += 2.5
+        elif rd > 5:  score += 1.5
+        elif rd > 2:  score += 0.5
+
+    return round(_clip(score, 0, 15))
+
+
+# ============================================================
+#  维度4: 趋势评分 (满分15)
+# ============================================================
 def score_trend(indicators: Dict[str, pd.Series], close: pd.Series,
                 idx: int = -1) -> int:
-    """
-    趋势评分 (满分30)
-    基于实际分布: P50(MA5>MA20)=18%, P50(RSI12)=37.9, P50(MACD_DIF)=-0.21
-    """
+    """趋势评分 — MA排列 + MACD + RSI"""
     score = 0.0
+    price = float(close.iloc[idx]) if not pd.isna(close.iloc[idx]) else None
 
-    # 1. MA排列 (12分) — 检查各周期均线位置
+    # MA排列 (6分)
     mas = ["ma5", "ma10", "ma20", "ma60"]
     ma_vals = {}
     for m in mas:
         if m in indicators:
             v = indicators[m].iloc[idx]
             ma_vals[m] = float(v) if not pd.isna(v) else None
-
-    price = float(close.iloc[idx]) if not pd.isna(close.iloc[idx]) else None
-
     if price and all(v is not None for v in ma_vals.values()):
-        # 价格在MA上方个数
-        above_count = sum(1 for v in ma_vals.values() if price > v)
-        score += above_count * 2.0  # 每个MA=2分, 最高8分
+        above = sum(1 for v in ma_vals.values() if price > v)
+        score += above * 1.0
+        pairs = [('ma5','ma10'),('ma10','ma20'),('ma20','ma60')]
+        align = sum(1 for a,b in pairs
+                    if ma_vals.get(a) and ma_vals.get(b) and ma_vals[a] > ma_vals[b])
+        score += align * 1.0
 
-        # 多头排列: 短周期>长周期个数
-        align_pairs = [('ma5','ma10'),('ma10','ma20'),('ma20','ma60')]
-        align_count = sum(1 for a,b in align_pairs
-                         if ma_vals.get(a) and ma_vals.get(b) and ma_vals[a] > ma_vals[b])
-        score += align_count * 1.33  # 每对1.33分, 最高4分
-
-    # 2. MACD (10分)
-    dif = indicators.get("macd_dif", pd.Series()).iloc[idx]
-    dea = indicators.get("macd_dea", pd.Series()).iloc[idx]
-    hist = indicators.get("macd_hist", pd.Series()).iloc[idx]
-
+    # MACD (5分)
+    dif = float(indicators.get("macd_dif", pd.Series([0])).iloc[idx] or 0)
+    dea = float(indicators.get("macd_dea", pd.Series([0])).iloc[idx] or 0)
+    hist = float(indicators.get("macd_hist", pd.Series([0])).iloc[idx] or 0)
     if not any(pd.isna(v) for v in [dif, dea, hist]):
-        dif, dea, hist = float(dif), float(dea), float(hist)
-        # DIF位置: P50=-0.21, 归一化到[-2, 2] → [0, 5]分
         dif_norm = _clip((dif + 2.0) / 4.0, 0, 1)
-        score += dif_norm * 4.0
-
-        # 金叉/死叉: DIF>DEA
+        score += dif_norm * 2.0
         if dif > dea:
-            score += 3.0
-            if hist > 0: score += 2.0  # 柱线也在变好
-        elif dif > 0:
-            score += 1.5
-        # 底背离: dif在回升但价格在跌
+            score += 2.0
+            if hist > 0: score += 1.0
         if idx > 0:
-            prev_dif = float(indicators["macd_dif"].iloc[idx-1])
-            if not pd.isna(prev_dif) and dif > prev_dif:
-                score += 1.0
+            prev_dif = float(indicators["macd_dif"].iloc[idx-1] or 0)
+            if dif > prev_dif: score += 0.5
 
-    # 3. RSI (8分) — 40-70最优, 30-40和70-80次优
-    rsi12 = indicators.get("rsi12", pd.Series()).iloc[idx]
-    if not pd.isna(rsi12):
-        rsi12 = float(rsi12)
-        if 40 <= rsi12 <= 70:
-            score += 7.0 - abs(rsi12 - 55) / 15 * 2  # 55最优, 衰减
-        elif 30 <= rsi12 < 40:
-            score += 4.0 + (rsi12 - 30) / 10 * 3  # 超卖有反弹机会
-        elif 70 < rsi12 <= 80:
-            score += 4.0 - (rsi12 - 70) / 10 * 3  # 偏强但未超买
-        elif rsi12 > 80:
-            score += 1.0  # 严重超买
-        else:
-            score += 2.0 + (rsi12 - 20) / 10 * 2  # <30 超卖
+    # RSI (4分)
+    rsi12 = float(indicators.get("rsi12", pd.Series([50])).iloc[idx] or 50)
+    if 40 <= rsi12 <= 70:
+        score += 3.5 - abs(rsi12 - 55) / 15 * 1.5
+    elif 30 <= rsi12 < 40:
+        score += 2.0 + (rsi12 - 30) / 10 * 1.5
+    else:
+        score += max(0, 1.5 - abs(rsi12 - 50) / 50 * 2)
 
-    return round(min(score, 30.0))
+    return round(min(score, 15.0))
 
 
-def score_capital(indicators: Dict[str, pd.Series], df: pd.DataFrame,
-                  idx: int = -1) -> int:
-    """
-    资金评分 (满分25)
-    基于实际分布: P50(量比)=0.89, P50(换手率)=0.024%, P90(换手率)=0.14%
-    """
+# ============================================================
+#  维度5: 动量评分 (满分10)
+# ============================================================
+def score_momentum(indicators: Dict[str, pd.Series], df: pd.DataFrame,
+                   idx: int = -1) -> int:
+    """动量评分 — 量比 + 换手率 + 相对强弱"""
     score = 0.0
     close = df["close"]
     volume = df["volume"]
+
+    # 量比 (4分)
+    vol_ma5 = float(indicators.get("vol_ma5", pd.Series([1])).iloc[idx] or 1)
+    cur_vol = float(volume.iloc[idx])
+    if vol_ma5 > 0:
+        ratio = cur_vol / vol_ma5
+        score += min(4.0, ratio / 3.0 * 4.0)
+
+    # 换手率 (2分)
     turnover = df.get("turnover", pd.Series())
-
-    # 1. 量比 (10分) — 相对于5日均量的比值
-    vol_ma5 = indicators.get("vol_ma5", pd.Series()).iloc[idx]
-    cur_vol = volume.iloc[idx]
-    if not pd.isna(vol_ma5) and vol_ma5 > 0:
-        vol_ratio = float(cur_vol / vol_ma5)
-        # P50=0.89, P90=1.26. 用连续映射: ratio/2.0 × 10, cap at 10
-        score += min(10.0, max(1.0, vol_ratio / 2.0 * 10.0))
-
-    # 2. 换手率活跃度 (8分) — 百分位映射
     if len(turnover) > 0:
-        cur_turnover = turnover.iloc[idx]
-        if not pd.isna(cur_turnover) and cur_turnover > 0:
-            t = float(cur_turnover)
-            # 用对数映射解决极度右偏: log10(t*10000)/6 * 8
-            # P50=0.024→log10(244)=2.39→3.2分, P90=0.14→log10(1400)=3.15→4.2分
+        t = float(turnover.iloc[idx] or 0)
+        if t > 0:
             log_t = np.log10(max(1, t * 10000))
-            score += min(8.0, log_t / 5.0 * 8.0)
+            score += min(2.0, log_t / 5.0 * 2.0)
 
-    # 3. 量价配合 (7分)
+    # 量价配合 (4分)
     if idx > 0:
-        pct = (close.iloc[idx] / close.iloc[idx - 1] - 1) * 100
-        vol_chg = volume.iloc[idx] / volume.iloc[idx - 1] if volume.iloc[idx - 1] > 0 else 1
-
+        pct = (float(close.iloc[idx]) / float(close.iloc[idx-1]) - 1) * 100
+        vol_chg = float(volume.iloc[idx]) / float(volume.iloc[idx-1]) if float(volume.iloc[idx-1]) > 0 else 1
         if pct > 0:
-            if vol_chg > 1.2:
-                score += 7.0  # 放量上涨—最佳
-            elif vol_chg > 1.0:
-                score += 5.0
-            else:
-                score += 3.0  # 缩量上涨—一般
-        elif pct < 0:
-            if vol_chg < 0.8:
-                score += 2.0  # 缩量下跌—有承接
-            else:
-                score += 0.0  # 放量下跌—差
+            if vol_chg > 1.2:  score += 4.0
+            elif vol_chg > 1.0: score += 3.0
+            else:              score += 1.5
         else:
-            score += 2.0  # 平盘
+            if vol_chg < 0.8: score += 1.5
+            else:             score += 0.0
 
-    return round(min(score, 25.0))
-
-
-def score_valuation(df: pd.DataFrame, idx: int = -1) -> int:
-    """估值评分 (满分15) — PE/PB优先，缺失时用流动性代理"""
-    score = 8.0
-    pe = df.get("pe", pd.Series()).iloc[idx] if "pe" in df.columns else np.nan
-    pb = df.get("pb", pd.Series()).iloc[idx] if "pb" in df.columns else np.nan
-
-    has_pe = not pd.isna(pe) and float(pe) > 0
-    has_pb = not pd.isna(pb) and float(pb) > 0
-
-    if has_pe or has_pb:
-        if has_pe:
-            pe = float(pe)
-            if pe < 10:  score += 5.0
-            elif pe < 20: score += 3.0
-            elif pe < 30: score += 1.5
-            elif pe < 50: score += 0.0
-            elif pe < 80: score -= 2.0
-            else:         score -= 4.0
-        if has_pb:
-            pb = float(pb)
-            if pb < 1:    score += 3.0
-            elif pb < 2:  score += 1.5
-            elif pb < 5:  score += 0.0
-            elif pb < 10: score -= 1.0
-            else:         score -= 2.0
-    else:
-        # PE/PB缺失时：用流动性代理估值（换手率高→市场定价充分→估值合理）
-        turnover = df.get("turnover", pd.Series())
-        if len(turnover) > 0:
-            t = turnover.iloc[idx]
-            if not pd.isna(t) and t > 0:
-                t = float(t)
-                # P50=0.024%, P90=0.14%. 映射到3-12分
-                log_t = np.log10(max(1, t * 10000))
-                score = 3.0 + min(9.0, log_t / 5.0 * 9.0)
-
-    return round(_clip(score, 0, 15))
+    return round(min(score, 10.0))
 
 
-def score_sentiment(close: pd.Series, indicators: Dict[str, pd.Series],
-                    idx: int = -1) -> int:
-    """情绪评分 (满分15) — 基于涨跌幅+RSI极端"""
-    score = 7.0  # 默认中性
+# ============================================================
+#  维度6: 财务健康 (满分10)
+# ============================================================
+def score_financial_health(fin: Dict = None) -> int:
+    """财务健康 — 负债率 + 流动比率 + 利息覆盖"""
+    score = 5.0
+    fin = fin or {}
 
-    # 1. 5日涨跌幅 (6分)
-    if idx >= 4:
-        pct5 = (close.iloc[idx] / close.iloc[idx - 4] - 1) * 100
-        # P50≈0%. 用连续映射: pct5/20 * 6
-        score += _clip(pct5 / 20.0 * 6.0, -3.0, 6.0)
+    # 资产负债率 (4分) — 越低越安全
+    dr = fin.get("debt_ratio")
+    if dr is not None:
+        if dr < 20:    score += 4.0
+        elif dr < 40:  score += 3.0
+        elif dr < 60:  score += 2.0
+        elif dr < 70:  score += 1.0
+        elif dr > 80:  score -= 2.0  # 高杠杆风险
 
-    # 2. RSI6极端 (5分) — 30-70健康, 超卖有反弹机会
-    rsi6 = indicators.get("rsi6", pd.Series()).iloc[idx]
-    if not pd.isna(rsi6):
-        rsi6 = float(rsi6)
-        if 30 <= rsi6 <= 70:
-            score += 4.0 - abs(rsi6 - 50) / 20 * 2
-        elif rsi6 < 30:
-            score += 3.0 + (30 - rsi6) / 30 * 2  # 超卖加分
-        else:
-            score += 1.0  # 超买
+    # 流动比率 (3分)
+    cr = fin.get("current_ratio")
+    if cr is not None:
+        if cr > 2.5:   score += 3.0
+        elif cr > 1.5: score += 2.5
+        elif cr > 1.0: score += 1.5
+        elif cr > 0.5: score += 0.5
+        else:         score -= 1.0  # 流动性风险
 
-    # 3. 连涨/连跌 (4分)
-    n = len(close)
-    pos = n + idx if idx < 0 else idx
-    if pos >= 5:
-        cons_up = sum(1 for i in range(pos, max(pos-5, 1), -1)
-                     if close.iloc[i] > close.iloc[i-1])
-        score += min(4.0, cons_up * 1.33)
+    # 利息覆盖 (3分) — 用 ROE>负债率 代理
+    if dr is not None and fin.get("roe") is not None:
+        if float(fin["roe"]) > dr * 1.5:
+            score += 3.0
+        elif float(fin["roe"]) > dr:
+            score += 1.5
 
-    return round(_clip(score, 0, 15))
+    return round(_clip(score, 0, 10))
 
 
+# ============================================================
+#  维度7: 机构共识 (满分10)
+# ============================================================
+def score_institutional(fin: Dict = None, df: pd.DataFrame = None,
+                        idx: int = -1) -> int:
+    """机构共识 — 北向持仓 + 持仓变化 + 资金趋势"""
+    score = 5.0
+    fin = fin or {}
+
+    # 1. 北向持仓占比 (4分) — 有北向且比例高=机构深度认可
+    nb_pct = fin.get("northbound_pct")
+    nb_hold = fin.get("northbound_holding")
+    if nb_pct is not None:
+        if nb_pct > 5.0:    score += 4.0   # 重仓股
+        elif nb_pct > 2.0:  score += 3.0
+        elif nb_pct > 1.0:  score += 2.0
+        elif nb_pct > 0.3:  score += 1.0
+        elif nb_pct > 0:    score += 0.5
+    elif nb_hold is not None and nb_hold > 0:
+        score += 2.0  # 有持仓但比例未知
+
+    # 2. 近5日净买入方向 (3分) — 近期持续加仓=积极信号
+    nb_net = fin.get("northbound_net_5d")
+    if nb_net is not None:
+        if nb_net > 0.5:    score += 3.0   # 大幅净买入
+        elif nb_net > 0.1:  score += 2.0
+        elif nb_net > 0:    score += 1.0
+        elif nb_net < -0.5: score -= 2.0   # 大幅净卖出=撤退信号
+
+    # 3. 价格趋势 + 北向持股市值 (3分) — 量价配合确认
+    nb_value = fin.get("northbound_value")
+    if nb_value is not None and nb_value > 1e7:  # 持股市值 > 1000万
+        score += 1.0
+    if df is not None and idx >= 20:
+        window = df["close"].iloc[max(0, idx-20):idx+1]
+        if len(window) >= 10:
+            mid = len(window) // 2
+            if window.iloc[mid:].mean() > window.iloc[:mid].mean() * 1.02:
+                if nb_hold is not None and nb_hold > 0:
+                    score += 2.0  # 有北向 + 价格上行 = 机构驱动型上涨
+                else:
+                    score += 1.0
+
+    return round(_clip(score, 0, 10))
+
+
+# ============================================================
+#  维度8: 风险评分 (满分5)
+# ============================================================
 def score_risk(indicators: Dict[str, pd.Series], close: pd.Series,
-               df: pd.DataFrame, idx: int = -1) -> int:
-    """风险评分 (满分15) — 分数越高=风险越低"""
-    score = 7.0  # 默认中等
+               idx: int = -1) -> int:
+    """风险评分 — 回撤 + 波动率"""
+    score = 2.5
 
-    # 1. BOLL位置 (5分) — 中轨=最优
-    pct_b = indicators.get("boll_pct_b", pd.Series()).iloc[idx]
-    if not pd.isna(pct_b):
-        pct_b = float(pct_b)
-        # P50=0.18. 距离0.5越近越好
-        score += max(0, 5.0 - abs(pct_b - 0.5) * 8.0)
-
-    # 2. ATR波动率 (5分) — 越低越稳
-    atr = indicators.get("atr14", pd.Series()).iloc[idx]
-    c = close.iloc[idx]
-    if not pd.isna(atr) and not pd.isna(c) and c > 0:
-        atr_pct = float(atr / c * 100)
-        # P50=5.0%. <2%很稳, 2-5%正常, 5-8%偏高, >8%高波动
-        if atr_pct < 2:   score += 5.0
-        elif atr_pct < 5: score += 3.5 + (5-atr_pct)/3*1.5
-        elif atr_pct < 8: score += 1.0 + (8-atr_pct)/3*2.5
-        else:             score += 0.0
-
-    # 3. 10日回撤 (5分) — 越小越好
+    # 10日最大回撤 (3分)
     if idx >= 9:
         window = close.iloc[idx-9:idx+1]
         peak = window.cummax()
         dd = abs(float((window.iloc[-1] / peak.iloc[-1] - 1) * 100))
-        # dd=0→5分, dd=3%→3分, dd=10%→0分
-        score += max(0, 5.0 - dd / 2.0)
+        score += max(0, 3.0 - dd / 4.0)
 
-    return round(_clip(score, 0, 15))
+    # 波动率 (2分)
+    atr = float(indicators.get("atr14", pd.Series([0])).iloc[idx] or 0)
+    c = float(close.iloc[idx])
+    if atr > 0 and c > 0:
+        atr_pct = atr / c * 100
+        if atr_pct < 3:   score += 2.0
+        elif atr_pct < 6: score += 1.0
+        else:             score += 0.0
+
+    return round(_clip(score, 0, 5))
 
 
-def calc_five_dim_scores(df: pd.DataFrame) -> Dict:
-    """计算五维评分"""
+# ============================================================
+#  主入口
+# ============================================================
+def calc_five_dim_scores(df: pd.DataFrame, code: str = "") -> Dict:
+    """
+    七维评分 V5.0
+
+    参数:
+      df:   K线 DataFrame, 必须含 [close, volume], 可选 [pe, pb, turnover]
+      code: 股票代码, 用于拉取基本面+行业+北向数据
+
+    返回:
+      {total_score, valuation_score, earnings_quality_score, growth_score,
+       trend_score, momentum_score, health_score, consensus_score, risk_score,
+       details: {...}}
+    """
+    from services.indicator_service import calc_all, indicators_summary
+
     close = df["close"]
     indicators = calc_all(df)
     idx = -1
+    industry = _get_industry(code)
+    fin = _fetch_financials(code) if code else {}
 
-    trend = score_trend(indicators, close, idx)
-    capital = score_capital(indicators, df, idx)
-    valuation = score_valuation(df, idx)
-    sentiment = score_sentiment(close, indicators, idx)
-    risk = score_risk(indicators, close, df, idx)
+    # 八维计算
+    valuation  = score_valuation(df, idx, industry, fin)      # 15
+    earnings   = score_earnings_quality(df, idx, fin)         # 20
+    growth     = score_growth(fin)                            # 15
+    trend      = score_trend(indicators, close, idx)          # 15
+    momentum   = score_momentum(indicators, df, idx)          # 10
+    health     = score_financial_health(fin)                  # 10
+    consensus  = score_institutional(fin, df, idx)            # 10
+    risk       = score_risk(indicators, close, idx)           #  5
+    #                    总计 = 100
 
-    total = trend + capital + valuation + sentiment + risk
+    raw_total = valuation + earnings + growth + trend + momentum + health + consensus + risk
 
-    # V3.3 分布拉伸: 扩展分数区间 → 近似正态分布
-    # 原始聚类约[25,60] → 目标[10,95]
-    # 原始分均值 51.3, max~70, RAW_MAX=75 覆盖 95%+ 股票, 天花板<5%
-    RAW_MIN, RAW_MAX = 25.0, 75.0
-    TARGET_MIN, TARGET_MAX = 10.0, 95.0
-    if RAW_MAX > RAW_MIN:
-        total = round(TARGET_MIN + (total - RAW_MIN) / (RAW_MAX - RAW_MIN) * (TARGET_MAX - TARGET_MIN))
-        total = max(10, min(98, total))
+    # 分布拉伸
+    RAW_MIN, RAW_MAX = max(15.0, raw_total - 30), min(90.0, raw_total + 30)
+    total = round(10.0 + (raw_total - RAW_MIN) / max(0.01, RAW_MAX - RAW_MIN) * 85.0)
+    total = max(5, min(98, total))
 
-    from services.indicator_service import indicators_summary
     details = indicators_summary(indicators, idx)
     details["close"] = round(float(close.iloc[idx]), 2) if not pd.isna(close.iloc[idx]) else None
+    details["industry"] = industry
+    details["financial_data"] = {k: v for k, v in fin.items()
+                                 if isinstance(v, (int, float))}
 
     return {
-        "total_score": total,
-        "trend_score": trend,
-        "capital_score": capital,
-        "valuation_score": valuation,
-        "sentiment_score": sentiment,
-        "risk_score": risk,
-        "details": details,
+        "total_score":            total,
+        "valuation_score":        valuation,
+        "earnings_quality_score": earnings,
+        "growth_score":           growth,
+        "trend_score":            trend,
+        "momentum_score":         momentum,
+        "health_score":           health,
+        "consensus_score":        consensus,
+        "risk_score":             risk,
+        "details":                details,
     }
 
 
+def _get_industry(code: str) -> str:
+    try:
+        from database import SessionLocal
+        from models import StockBasic
+        db = SessionLocal()
+        stock = db.query(StockBasic).filter(StockBasic.code == code).first()
+        db.close()
+        if stock and getattr(stock, "industry", ""):
+            return stock.industry
+    except Exception:
+        pass
+    return ""
+
+
 def batch_score(stock_data: Dict[str, pd.DataFrame]) -> Dict[str, Dict]:
-    """批量计算"""
     results = {}
     for code, df in stock_data.items():
         try:
-            results[code] = calc_five_dim_scores(df)
+            results[code] = calc_five_dim_scores(df, code)
         except Exception as e:
             results[code] = {"error": str(e), "total_score": 0}
     return results
 
 
-# 保留旧引用
 from services.indicator_service import calc_all

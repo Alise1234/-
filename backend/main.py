@@ -4,7 +4,7 @@ A股AI选股系统 — 后端服务
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import market, analysis, backtest, screener, portfolio, ai, risk, signal
+from routers import market, analysis, backtest, screener, portfolio, ai, risk, signal, smart_screener
 from database import init_db
 from config import HOST, PORT, CORS_ORIGINS
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -36,6 +36,7 @@ app.include_router(ai.router)
 app.include_router(risk.router)
 app.include_router(signal.router)
 app.include_router(market._admin)
+app.include_router(smart_screener.router)
 
 
 @app.get("/")
@@ -79,8 +80,10 @@ async def startup():
     # APScheduler: 交易日 15:30 自动执行增量更新
     try:
         from scheduler.daily_job import run_incremental, update_stock_basic
+        from database import SessionLocal
+        from sqlalchemy import text
+        from datetime import date
         scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
-        # 周一至周五 18:00 执行增量更新（K线+指标+评分）
         scheduler.add_job(
             run_incremental,
             CronTrigger(day_of_week="mon-fri", hour=15, minute=30),
@@ -98,6 +101,26 @@ async def startup():
         )
         scheduler.start()
         print("[OK] 定时任务调度器已启动 (交易日15:30增量更新, 周六02:00股票列表)")
+
+        # 启动补偿：如果今天还没有K线数据，立即跑一次增量更新
+        import threading
+        def _startup_catchup():
+            import time
+            time.sleep(5)  # 等数据库连接就绪
+            try:
+                db2 = SessionLocal()
+                today_count = db2.execute(text(
+                    "SELECT COUNT(*) FROM stock_daily_k WHERE trade_date = :d"
+                ), {"d": date.today()}).scalar()
+                db2.close()
+                if today_count is not None and today_count < 100:
+                    print(f"[CATCHUP] 今日K线仅{today_count}条，启动补偿更新...")
+                    run_incremental()
+                else:
+                    print(f"[CATCHUP] 今日已有{today_count}条K线，跳过补偿")
+            except Exception as e:
+                print(f"[CATCHUP] 补偿检查失败: {e}")
+        threading.Thread(target=_startup_catchup, daemon=True).start()
     except Exception as e:
         print(f"[WARN] 定时任务调度器启动失败: {e}")
 

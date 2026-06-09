@@ -166,7 +166,7 @@ def top_sell_signals(limit: int = 10, max_score: int = 50) -> List[Dict]:
         db.close()
 
 
-def rebalance_suggestions() -> List[Dict]:
+def rebalance_suggestions(stop_loss_pct: float = -5.0) -> List[Dict]:
     """
     调仓建议
 
@@ -220,9 +220,9 @@ def rebalance_suggestions() -> List[Dict]:
                 action = "REDUCE"
                 reason = f"盈利{profit_pct:.1f}%丰厚, 建议减仓锁定"
                 target_pct = max(0, pos.quantity // 2)
-            elif profit_pct < -8:
+            elif profit_pct < stop_loss_pct:
                 action = "SELL"
-                reason = f"亏损{profit_pct:.1f}%触及止损线"
+                reason = f"亏损{profit_pct:.1f}%触及止损线({stop_loss_pct}%)"
                 target_pct = 0
             elif rsi12 > 85:
                 action = "REDUCE"
@@ -246,10 +246,10 @@ def rebalance_suggestions() -> List[Dict]:
         db.close()
 
 
-def daily_signal_report() -> Dict:
-    """每日信号报告"""
+def daily_signal_report(stop_loss_pct: float = -5.0) -> Dict:
+    """每日信号报告 V4.0 — 止损参数可配"""
     return {
         "buy_signals": top_buy_signals(10),
         "sell_signals": top_sell_signals(10),
-        "rebalance": rebalance_suggestions(),
+        "rebalance": rebalance_suggestions(stop_loss_pct),
     }
